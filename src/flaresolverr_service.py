@@ -57,6 +57,8 @@ SHORT_TIMEOUT = 1
 SESSIONS_STORAGE = SessionsStorage()
 
 CAPABILITIES = ['kani.capture/1', 'kani.capture/2']
+CHALLENGE_SOLVED_MESSAGE = "Challenge solved!"
+CHALLENGE_ABSENT_MESSAGE = "Challenge not detected!"
 KANI_CAPTURE_DEFAULT_TIMEOUT = 30000
 KANI_CAPTURE_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 KANI_CAPTURE_POLL_INTERVAL = 0.25
@@ -297,8 +299,14 @@ def _cmd_kani_capture(req: V1RequestBase) -> V1ResponseBase:
 
 def _kani_capture_logic(req: V1RequestBase, driver: WebDriver) -> V1ResponseBase:
     logging.debug(f"Navigating to... {req.url}")
+    timings = {}
+    phase_start = time.monotonic()
     driver.get(req.url)
+    timings['navigateMs'] = int((time.monotonic() - phase_start) * 1000)
+
+    phase_start = time.monotonic()
     solve_message = _detect_and_solve_challenge(driver)
+    timings['solveMs'] = int((time.monotonic() - phase_start) * 1000)
 
     # The solve may have left the driver pointed at a window that Cloudflare
     # replaced. CDP init scripts bind to the attached target, so a stale handle
@@ -318,10 +326,14 @@ def _kani_capture_logic(req: V1RequestBase, driver: WebDriver) -> V1ResponseBase
         script_ids.extend([shim.get('identifier'), init.get('identifier')])
 
         logging.debug("Reloading the cleared page with the capture script installed")
+        phase_start = time.monotonic()
         driver.get(req.url)
-        _detect_and_solve_challenge(driver)
+        reload_message = _detect_and_solve_challenge(driver)
+        timings['reloadMs'] = int((time.monotonic() - phase_start) * 1000)
 
+        phase_start = time.monotonic()
         payload = _poll_for_payload(req, driver)
+        timings['captureMs'] = int((time.monotonic() - phase_start) * 1000)
 
         res = V1ResponseBase({})
         res.status = STATUS_OK
@@ -332,6 +344,8 @@ def _kani_capture_logic(req: V1RequestBase, driver: WebDriver) -> V1ResponseBase
         challenge_res.cookies = driver.get_cookies()
         challenge_res.userAgent = utils.get_user_agent(driver)
         challenge_res.payload = payload
+        challenge_res.timings = timings
+        challenge_res.reChallenged = reload_message == CHALLENGE_SOLVED_MESSAGE
         res.solution = challenge_res
         return res
     finally:
@@ -656,10 +670,10 @@ def _detect_and_solve_challenge(driver: WebDriver) -> str:
             logging.debug("Timeout waiting for redirect")
 
         logging.info("Challenge solved!")
-        return "Challenge solved!"
+        return CHALLENGE_SOLVED_MESSAGE
 
     logging.info("Challenge not detected!")
-    return "Challenge not detected!"
+    return CHALLENGE_ABSENT_MESSAGE
 
 
 def _post_request(req: V1RequestBase, driver: WebDriver):
