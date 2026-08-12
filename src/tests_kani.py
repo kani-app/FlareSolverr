@@ -79,6 +79,7 @@ class TestKaniCapture(unittest.TestCase):
     def test_index_advertises_capability(self):
         body = IndexResponse(self.app.get('/').json)
         self.assertIn('kani.capture/1', body.capabilities)
+        self.assertIn('kani.capture/2', body.capabilities)
 
     def test_capture_returns_page_generated_token(self):
         res = self.app.post_json('/v1', {
@@ -115,17 +116,52 @@ class TestKaniCapture(unittest.TestCase):
         self.assertEqual(STATUS_ERROR, body.status)
         self.assertIn("'url' is mandatory", body.message)
 
-    def test_capture_rejects_sessions(self):
+    def test_capture_reuses_a_session_without_leaking_scripts(self):
+        session = 'kani-test-script-cleanup'
+        try:
+            first = self.app.post_json('/v1', {
+                'cmd': 'kani.capture',
+                'url': self._url(),
+                'initScript': INIT_SCRIPT,
+                'session': session,
+                'maxTimeout': 60000
+            })
+            self.assertEqual(STATUS_OK, V1ResponseBase(first.json).status)
+
+            second = self.app.post_json('/v1', {
+                'cmd': 'kani.capture',
+                'url': self._url(),
+                'initScript': 'window.__noop = 1;',
+                'session': session,
+                'captureTimeout': 1000,
+                'maxTimeout': 60000
+            }, status=500)
+            self.assertIn('passPayload was not called', V1ResponseBase(second.json).message)
+        finally:
+            self.app.post_json('/v1', {
+                'cmd': 'sessions.destroy',
+                'session': session
+            })
+
+    def test_capture_heartbeat_extends_the_idle_deadline(self):
+        script = """
+var heartbeat = setInterval(function () { window.resetPayloadTimer(); }, 200);
+setTimeout(function () {
+  clearInterval(heartbeat);
+  window.passPayload('ready');
+}, 1400);
+"""
         res = self.app.post_json('/v1', {
             'cmd': 'kani.capture',
             'url': self._url(),
-            'initScript': INIT_SCRIPT,
-            'session': 'anything'
-        }, status=500)
+            'initScript': script,
+            'captureTimeout': 500,
+            'maxTimeout': 10000
+        })
 
         body = V1ResponseBase(res.json)
-        self.assertEqual(STATUS_ERROR, body.status)
-        self.assertIn("'session' is not supported", body.message)
+        self.assertEqual(STATUS_OK, body.status)
+        self.assertEqual('ready', body.solution.payload)
 
     def test_capture_times_out_when_payload_never_arrives(self):
         res = self.app.post_json('/v1', {

@@ -58,6 +58,7 @@ class V1RequestBase(object):
     captureTimeout: int = None
     maxPayloadBytes: int = None
     autoScroll: bool = None
+    profileKey: str = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)
