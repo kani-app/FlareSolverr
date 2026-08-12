@@ -265,16 +265,19 @@ def _cmd_kani_capture(req: V1RequestBase) -> V1ResponseBase:
     timeout = int(req.maxTimeout) / 1000
     driver = None
     session = None
+    started_at = time.monotonic()
     try:
         if req.session:
             ttl = timedelta(minutes=req.session_ttl_minutes) if req.session_ttl_minutes else None
-            with SESSIONS_STORAGE.locked(req.session, ttl, req.profileKey) as (session, fresh):
+            with SESSIONS_STORAGE.locked(
+                    req.session, ttl, req.profileKey, timeout) as (session, fresh):
                 driver = session.driver
                 if fresh:
                     logging.debug(f"new session created to perform the capture (session_id={req.session})")
                 else:
                     logging.debug(f"existing session is used to perform the capture (session_id={req.session})")
-                return func_timeout(timeout, _kani_capture_logic, (req, driver))
+                remaining = max(0.001, timeout - (time.monotonic() - started_at))
+                return func_timeout(remaining, _kani_capture_logic, (req, driver))
         driver = utils.get_webdriver(req.proxy)
         logging.debug('New instance of webdriver has been created to perform the capture')
         return func_timeout(timeout, _kani_capture_logic, (req, driver))
@@ -394,11 +397,12 @@ def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
     timeout = int(req.maxTimeout) / 1000
     driver = None
     session = None
+    started_at = time.monotonic()
     try:
         if req.session:
             session_id = req.session
             ttl = timedelta(minutes=req.session_ttl_minutes) if req.session_ttl_minutes else None
-            with SESSIONS_STORAGE.locked(session_id, ttl) as (session, fresh):
+            with SESSIONS_STORAGE.locked(session_id, ttl, timeout=timeout) as (session, fresh):
                 if fresh:
                     logging.debug(f"new session created to perform the request (session_id={session_id})")
                 else:
@@ -406,7 +410,8 @@ def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
                                   f"lifetime={str(session.lifetime())}, ttl={str(ttl)})")
 
                 driver = session.driver
-                return func_timeout(timeout, _evil_logic, (req, driver, method))
+                remaining = max(0.001, timeout - (time.monotonic() - started_at))
+                return func_timeout(remaining, _evil_logic, (req, driver, method))
         else:
             driver = utils.get_webdriver(req.proxy)
             logging.debug('New instance of webdriver has been created to perform the request')

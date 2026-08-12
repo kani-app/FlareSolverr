@@ -122,10 +122,14 @@ class SessionsStorage:
 
     @contextmanager
     def locked(self, session_id: str, ttl: Optional[timedelta] = None,
-               profile_key: Optional[str] = None):
+               profile_key: Optional[str] = None,
+               timeout: Optional[float] = None):
         with self.lock:
             session, fresh = self.get(session_id, ttl, profile_key)
-            session.lock.acquire()
+            acquired = session.lock.acquire(timeout=timeout) if timeout is not None \
+                else session.lock.acquire()
+        if not acquired:
+            raise TimeoutError(f'Timeout waiting for session {session_id}.')
         try:
             yield session, fresh
         finally:
