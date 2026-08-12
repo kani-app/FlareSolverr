@@ -12,6 +12,7 @@ class ChallengeResolutionResultT:
     userAgent: str = None
     screenshot: str | None = None
     turnstile_token: str = None
+    payload: str = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)
@@ -52,6 +53,13 @@ class V1RequestBase(object):
     # Optional when you've got a turnstile captcha that needs to be clicked after X number of Tab presses
     tabs_till_verify : int = None
 
+    # kani.capture
+    initScript: str = None
+    captureTimeout: int = None
+    maxPayloadBytes: int = None
+    autoScroll: bool = None
+    profileKey: str = None
+
     def __init__(self, _dict):
         self.__dict__.update(_dict)
 
@@ -82,6 +90,7 @@ class IndexResponse(object):
     msg: str = None
     version: str = None
     userAgent: str = None
+    capabilities: list[str] = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)

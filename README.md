@@ -277,6 +277,56 @@ This works like `request.get`, with the addition of the postData parameter. Note
 | --------- | ------------------------------------------------------------------------ |
 | postData  | Must be a string with `application/x-www-form-urlencoded`. Eg: `a=b&c=d` |
 
+### + `kani.capture`
+
+Runs a caller-supplied init script inside the same browser profile that received
+the Cloudflare clearance, and returns the value that page hands to
+`passPayload()`.
+
+Some sites generate a token in their own JavaScript and only then issue the
+request that carries the data. Fetching such a page with `request.get` returns
+the pre-token HTML, and replaying the solved cookies into a second browser fails
+because clearance is bound to the visitor and device that solved it. This command
+keeps the solve, the token generation, the script execution, and the capture in
+one browser.
+
+Sequence: navigate and solve the challenge normally, register the shims and the
+init script with `Page.addScriptToEvaluateOnNewDocument`, reload the cleared
+page, then poll for `passPayload()` and return its argument as
+`solution.payload`. The script is registered after the solve so it never runs
+against the challenge document. Without `session`, each capture uses one
+temporary browser. With `session`, the cleared browser is reused and commands
+for that session are serialised.
+
+The init script runs before the page's own scripts on every document, so it must
+be idempotent. Two shims are provided to it: `passPayload(value)`, which records
+the first value it is given (objects are JSON-serialised), and
+`resetPayloadTimer()`, which rearms the capture deadline after progress. The
+whole-command `maxTimeout` remains a hard ceiling. Installed scripts and globals
+are removed after every capture so a reused session cannot run an older script.
+
+| Parameter       | Notes                                                                        |
+| --------------- | ---------------------------------------------------------------------------- |
+| url             | Mandatory.                                                                   |
+| initScript      | Mandatory. JavaScript evaluated on every new document in the top frame.       |
+| captureTimeout  | Optional, default 30000. Milliseconds to wait for `passPayload` after reload. |
+| maxPayloadBytes | Optional, default 8388608. Larger payloads are rejected.                      |
+| autoScroll      | Optional. Scrolls to the bottom of the page between polls.                    |
+| session         | Optional. Reuses one cleared browser session across captures.                 |
+| session_ttl_minutes | Optional. Recreates a session after this much idle time.                |
+| profileKey      | Optional with `session`. Persists its Chromium profile under `/config`.     |
+
+`maxTimeout` still bounds the whole command, including the solve, so it must
+exceed `captureTimeout`.
+
+`GET /` advertises `kani.capture/1` and `kani.capture/2`. Version 2 adds reusable,
+serialised sessions, capture heartbeats, and per-capture script cleanup.
+
+> [!WARNING]
+> This command executes JavaScript supplied by the caller. Do not expose a
+> FlareSolverr instance publicly — this applies to the stock image too, but the
+> consequences are broader here.
+
 ## Environment variables
 
 | Name               | Default                | Notes                                                                                                                                    |

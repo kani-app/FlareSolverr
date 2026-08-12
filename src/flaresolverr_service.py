@@ -56,6 +56,34 @@ TURNSTILE_SELECTORS = [
 SHORT_TIMEOUT = 1
 SESSIONS_STORAGE = SessionsStorage()
 
+CAPABILITIES = ['kani.capture/1', 'kani.capture/2']
+KANI_CAPTURE_DEFAULT_TIMEOUT = 30000
+KANI_CAPTURE_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+KANI_CAPTURE_POLL_INTERVAL = 0.25
+
+# Installed with Page.addScriptToEvaluateOnNewDocument, so it re-runs on every
+# document in the target, including a Cloudflare re-challenge on the reload.
+# It must therefore stay idempotent and confine itself to the top frame.
+KANI_CAPTURE_SHIM = """
+(function () {
+  if (window.top !== window) return;
+  if (window.__kaniCapture) return;
+  var slot = { value: null, done: false, error: null, heartbeat: 0 };
+  window.__kaniCapture = slot;
+  window.passPayload = function (value) {
+    if (slot.done) return;
+    try {
+      slot.value = typeof value === 'string' ? value : JSON.stringify(value);
+      slot.done = true;
+    } catch (e) {
+      slot.error = 'passPayload serialization failed: ' + e;
+      slot.done = true;
+    }
+  };
+  window.resetPayloadTimer = function () { slot.heartbeat += 1; };
+})();
+"""
+
 
 def test_browser_installation():
     logging.info("Testing web browser installation...")
@@ -86,6 +114,7 @@ def index_endpoint() -> IndexResponse:
     res.msg = "FlareSolverr is ready!"
     res.version = utils.get_flaresolverr_version()
     res.userAgent = utils.get_user_agent()
+    res.capabilities = CAPABILITIES
     return res
 
 
@@ -141,6 +170,8 @@ def _controller_v1_handler(req: V1RequestBase) -> V1ResponseBase:
         res = _cmd_request_get(req)
     elif req.cmd == 'request.post':
         res = _cmd_request_post(req)
+    elif req.cmd == 'kani.capture':
+        res = _cmd_kani_capture(req)
     else:
         raise Exception(f"Request parameter 'cmd' = '{req.cmd}' is invalid.")
 
@@ -226,32 +257,168 @@ def _cmd_sessions_destroy(req: V1RequestBase) -> V1ResponseBase:
     })
 
 
+def _cmd_kani_capture(req: V1RequestBase) -> V1ResponseBase:
+    if req.url is None:
+        raise Exception("Request parameter 'url' is mandatory in 'kani.capture' command.")
+    if not req.initScript:
+        raise Exception("Request parameter 'initScript' is mandatory in 'kani.capture' command.")
+    timeout = int(req.maxTimeout) / 1000
+    driver = None
+    session = None
+    try:
+        if req.session:
+            ttl = timedelta(minutes=req.session_ttl_minutes) if req.session_ttl_minutes else None
+            with SESSIONS_STORAGE.locked(req.session, ttl, req.profileKey) as (session, fresh):
+                driver = session.driver
+                if fresh:
+                    logging.debug(f"new session created to perform the capture (session_id={req.session})")
+                else:
+                    logging.debug(f"existing session is used to perform the capture (session_id={req.session})")
+                return func_timeout(timeout, _kani_capture_logic, (req, driver))
+        driver = utils.get_webdriver(req.proxy)
+        logging.debug('New instance of webdriver has been created to perform the capture')
+        return func_timeout(timeout, _kani_capture_logic, (req, driver))
+    except FunctionTimedOut:
+        if session is not None:
+            SESSIONS_STORAGE.invalidate(req.session)
+        raise Exception(f'Error capturing the payload. Timeout after {timeout} seconds.')
+    except Exception as e:
+        raise Exception('Error capturing the payload. ' + str(e).replace('\n', '\\n'))
+    finally:
+        if session is None and driver is not None:
+            if utils.PLATFORM_VERSION == "nt":
+                driver.close()
+            driver.quit()
+            logging.debug('A used instance of webdriver has been destroyed')
+
+
+def _kani_capture_logic(req: V1RequestBase, driver: WebDriver) -> V1ResponseBase:
+    logging.debug(f"Navigating to... {req.url}")
+    driver.get(req.url)
+    solve_message = _detect_and_solve_challenge(driver)
+
+    # The solve may have left the driver pointed at a window that Cloudflare
+    # replaced. CDP init scripts bind to the attached target, so a stale handle
+    # would register the shim on a window that is never navigated again.
+    handles = driver.window_handles
+    if driver.current_window_handle not in handles:
+        driver.switch_to.window(handles[-1])
+
+    script_ids = []
+    try:
+        driver.execute_cdp_cmd("Page.enable", {})
+        shim = driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument", {"source": KANI_CAPTURE_SHIM})
+        init = driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": _wrap_init_script(req.initScript)
+        })
+        script_ids.extend([shim.get('identifier'), init.get('identifier')])
+
+        logging.debug("Reloading the cleared page with the capture script installed")
+        driver.get(req.url)
+        _detect_and_solve_challenge(driver)
+
+        payload = _poll_for_payload(req, driver)
+
+        res = V1ResponseBase({})
+        res.status = STATUS_OK
+        res.message = solve_message
+        challenge_res = ChallengeResolutionResultT({})
+        challenge_res.url = driver.current_url
+        challenge_res.status = 200
+        challenge_res.cookies = driver.get_cookies()
+        challenge_res.userAgent = utils.get_user_agent(driver)
+        challenge_res.payload = payload
+        res.solution = challenge_res
+        return res
+    finally:
+        for script_id in script_ids:
+            if script_id:
+                try:
+                    driver.execute_cdp_cmd(
+                        "Page.removeScriptToEvaluateOnNewDocument", {"identifier": script_id})
+                except Exception as e:
+                    logging.warning(f"Unable to remove capture init script: {e}")
+        try:
+            driver.execute_script(
+                "delete window.passPayload; delete window.resetPayloadTimer; delete window.__kaniCapture;")
+        except Exception as e:
+            logging.warning(f"Unable to clear capture globals: {e}")
+
+
+def _wrap_init_script(init_script: str) -> str:
+    return "if (window.top === window) { try {\n%s\n} catch (e) { " \
+           "if (window.__kaniCapture && !window.__kaniCapture.error) " \
+           "{ window.__kaniCapture.error = 'initScript threw: ' + e; } } }" % init_script
+
+
+def _poll_for_payload(req: V1RequestBase, driver: WebDriver) -> str:
+    capture_timeout = req.captureTimeout if req.captureTimeout else KANI_CAPTURE_DEFAULT_TIMEOUT
+    max_bytes = req.maxPayloadBytes if req.maxPayloadBytes else KANI_CAPTURE_MAX_PAYLOAD_BYTES
+    capture_timeout = int(capture_timeout)
+    max_bytes = min(int(max_bytes), KANI_CAPTURE_MAX_PAYLOAD_BYTES)
+    if capture_timeout < 1:
+        raise Exception('captureTimeout must be greater than zero.')
+    if max_bytes < 1:
+        raise Exception('maxPayloadBytes must be greater than zero.')
+    deadline = time.time() + (int(capture_timeout) / 1000)
+    heartbeat = 0
+
+    while time.time() < deadline:
+        if req.autoScroll:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        state = driver.execute_script(
+            "var s = window.__kaniCapture; if (!s) return null;"
+            "return { done: s.done, error: s.error,"
+            " heartbeat: s.heartbeat || 0,"
+            " size: s.value === null ? 0 : new TextEncoder().encode(s.value).length };"
+        )
+        if state is not None:
+            next_heartbeat = int(state.get('heartbeat') or 0)
+            if next_heartbeat != heartbeat:
+                heartbeat = next_heartbeat
+                deadline = time.time() + (capture_timeout / 1000)
+            if state.get('error'):
+                raise Exception(str(state['error']))
+            if state.get('done'):
+                size = int(state.get('size') or 0)
+                if size > max_bytes:
+                    raise Exception(f'Captured payload is {size} bytes, over the {max_bytes} byte limit.')
+                return driver.execute_script("return window.__kaniCapture.value;")
+        time.sleep(KANI_CAPTURE_POLL_INTERVAL)
+
+    raise Exception(f'passPayload was not called within {capture_timeout} ms.')
+
+
 def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
     timeout = int(req.maxTimeout) / 1000
     driver = None
+    session = None
     try:
         if req.session:
             session_id = req.session
             ttl = timedelta(minutes=req.session_ttl_minutes) if req.session_ttl_minutes else None
-            session, fresh = SESSIONS_STORAGE.get(session_id, ttl)
+            with SESSIONS_STORAGE.locked(session_id, ttl) as (session, fresh):
+                if fresh:
+                    logging.debug(f"new session created to perform the request (session_id={session_id})")
+                else:
+                    logging.debug(f"existing session is used to perform the request (session_id={session_id}, "
+                                  f"lifetime={str(session.lifetime())}, ttl={str(ttl)})")
 
-            if fresh:
-                logging.debug(f"new session created to perform the request (session_id={session_id})")
-            else:
-                logging.debug(f"existing session is used to perform the request (session_id={session_id}, "
-                              f"lifetime={str(session.lifetime())}, ttl={str(ttl)})")
-
-            driver = session.driver
+                driver = session.driver
+                return func_timeout(timeout, _evil_logic, (req, driver, method))
         else:
             driver = utils.get_webdriver(req.proxy)
             logging.debug('New instance of webdriver has been created to perform the request')
         return func_timeout(timeout, _evil_logic, (req, driver, method))
     except FunctionTimedOut:
+        if session is not None:
+            SESSIONS_STORAGE.invalidate(req.session)
         raise Exception(f'Error solving the challenge. Timeout after {timeout} seconds.')
     except Exception as e:
         raise Exception('Error solving the challenge. ' + str(e).replace('\n', '\\n'))
     finally:
-        if not req.session and driver is not None:
+        if session is None and driver is not None:
             if utils.PLATFORM_VERSION == "nt":
                 driver.close()
             driver.quit()
@@ -388,6 +555,32 @@ def _evil_logic(req: V1RequestBase, driver: WebDriver, method: str) -> Challenge
         else:
             driver.get(req.url)
 
+    res.message = _detect_and_solve_challenge(driver)
+
+    challenge_res = ChallengeResolutionResultT({})
+    challenge_res.url = driver.current_url
+    challenge_res.status = 200  # todo: fix, selenium not provides this info
+    challenge_res.cookies = driver.get_cookies()
+    challenge_res.userAgent = utils.get_user_agent(driver)
+    challenge_res.turnstile_token = turnstile_token
+
+    if not req.returnOnlyCookies:
+        challenge_res.headers = {}  # todo: fix, selenium not provides this info
+
+        if req.waitInSeconds and req.waitInSeconds > 0:
+            logging.info("Waiting " + str(req.waitInSeconds) + " seconds before returning the response...")
+            time.sleep(req.waitInSeconds)
+
+        challenge_res.response = driver.page_source
+
+    if req.returnScreenshot:
+        challenge_res.screenshot = driver.get_screenshot_as_base64()
+
+    res.result = challenge_res
+    return res
+
+
+def _detect_and_solve_challenge(driver: WebDriver) -> str:
     # wait for the page
     if utils.get_config_log_html():
         logging.debug(f"Response HTML:\n{driver.page_source}")
@@ -458,32 +651,10 @@ def _evil_logic(req: V1RequestBase, driver: WebDriver, method: str) -> Challenge
             logging.debug("Timeout waiting for redirect")
 
         logging.info("Challenge solved!")
-        res.message = "Challenge solved!"
-    else:
-        logging.info("Challenge not detected!")
-        res.message = "Challenge not detected!"
+        return "Challenge solved!"
 
-    challenge_res = ChallengeResolutionResultT({})
-    challenge_res.url = driver.current_url
-    challenge_res.status = 200  # todo: fix, selenium not provides this info
-    challenge_res.cookies = driver.get_cookies()
-    challenge_res.userAgent = utils.get_user_agent(driver)
-    challenge_res.turnstile_token = turnstile_token
-
-    if not req.returnOnlyCookies:
-        challenge_res.headers = {}  # todo: fix, selenium not provides this info
-
-        if req.waitInSeconds and req.waitInSeconds > 0:
-            logging.info("Waiting " + str(req.waitInSeconds) + " seconds before returning the response...")
-            time.sleep(req.waitInSeconds)
-
-        challenge_res.response = driver.page_source
-
-    if req.returnScreenshot:
-        challenge_res.screenshot = driver.get_screenshot_as_base64()
-
-    res.result = challenge_res
-    return res
+    logging.info("Challenge not detected!")
+    return "Challenge not detected!"
 
 
 def _post_request(req: V1RequestBase, driver: WebDriver):
