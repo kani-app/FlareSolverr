@@ -1,3 +1,4 @@
+import hmac
 import json
 import logging
 import os
@@ -16,6 +17,28 @@ import utils
 env_proxy_url = os.environ.get('PROXY_URL', None)
 env_proxy_username = os.environ.get('PROXY_USERNAME', None)
 env_proxy_password = os.environ.get('PROXY_PASSWORD', None)
+env_api_key = os.environ.get('API_KEY', None)
+
+
+def unauthorized_response():
+    """Returns a body when API_KEY is set and the request does not present it.
+
+    /v1 accepts caller-supplied JavaScript and addresses persistent browser
+    profiles by name, so an unauthenticated caller could read or poison another
+    caller's profile. Only /v1 is gated: /health serves container healthchecks
+    and / advertises capabilities, neither of which carries secrets.
+    """
+    if not env_api_key:
+        return None
+    provided = request.headers.get('X-Api-Key') or ''
+    if hmac.compare_digest(provided, env_api_key):
+        return None
+    response.status = 401
+    response.content_type = 'application/json'
+    return json.dumps({
+        'status': 'error',
+        'message': 'Unauthorized: missing or invalid X-Api-Key header.',
+    })
 
 
 class JSONErrorBottle(Bottle):
@@ -54,6 +77,9 @@ def controller_v1():
     """
     Controller v1
     """
+    denied = unauthorized_response()
+    if denied is not None:
+        return denied
     data = request.json or {}
     if (('proxy' not in data or not data.get('proxy')) and env_proxy_url is not None and (env_proxy_username is None and env_proxy_password is None)):
         logging.info('Using proxy URL ENV')
@@ -126,6 +152,10 @@ if __name__ == "__main__":
     logging.getLogger('undetected_chromedriver').setLevel(logging.WARNING)
 
     logging.info(f'FlareSolverr {utils.get_flaresolverr_version()}')
+    if env_api_key:
+        logging.info('API_KEY is set: /v1 requires the X-Api-Key header')
+    else:
+        logging.warning('API_KEY is not set: /v1 is unauthenticated, do not expose this port')
     logging.debug('Debug log enabled')
 
     # Get current OS for global variable

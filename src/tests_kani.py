@@ -192,3 +192,44 @@ setTimeout(function () {
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestKaniCaptureAuth(unittest.TestCase):
+    """The /v1 gate. Auth is opt-in, so the unset case must stay unchanged."""
+
+    KEY = 'test-secret-key'
+
+    def setUp(self):
+        self._previous = flaresolverr.env_api_key
+
+    def tearDown(self):
+        flaresolverr.env_api_key = self._previous
+
+    def _app(self, key):
+        flaresolverr.env_api_key = key
+        return TestApp(flaresolverr.app)
+
+    def test_v1_rejects_a_missing_key(self):
+        res = self._app(self.KEY).post_json('/v1', {'cmd': 'sessions.list'}, status=401)
+        self.assertEqual(STATUS_ERROR, res.json['status'])
+        self.assertIn('X-Api-Key', res.json['message'])
+
+    def test_v1_rejects_a_wrong_key(self):
+        res = self._app(self.KEY).post_json(
+            '/v1', {'cmd': 'sessions.list'},
+            headers={'X-Api-Key': 'wrong'}, status=401)
+        self.assertEqual(STATUS_ERROR, res.json['status'])
+
+    def test_v1_accepts_the_right_key(self):
+        res = self._app(self.KEY).post_json(
+            '/v1', {'cmd': 'sessions.list'}, headers={'X-Api-Key': self.KEY})
+        self.assertEqual(STATUS_OK, res.json['status'])
+
+    def test_v1_is_open_when_no_key_is_configured(self):
+        res = self._app(None).post_json('/v1', {'cmd': 'sessions.list'})
+        self.assertEqual(STATUS_OK, res.json['status'])
+
+    def test_index_and_health_stay_open_when_a_key_is_configured(self):
+        app = self._app(self.KEY)
+        self.assertIn('kani.capture/2', IndexResponse(app.get('/').json).capabilities)
+        self.assertEqual(STATUS_OK, app.get('/health').json['status'])
