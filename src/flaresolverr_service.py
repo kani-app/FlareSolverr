@@ -322,6 +322,9 @@ def _kani_capture_logic(req: V1RequestBase, driver: WebDriver,
     logging.debug(f"Navigating to... {req.url}")
     timings = {}
     script_ids = []
+    # True when a challenge appeared on a document that should already have been
+    # cleared, which is the signal that clearance is not holding.
+    rechallenged = False
     try:
         if cleared:
             script_ids = _register_capture_scripts(driver, req.initScript)
@@ -335,6 +338,7 @@ def _kani_capture_logic(req: V1RequestBase, driver: WebDriver,
             timings['solveMs'] = int((time.monotonic() - phase_start) * 1000)
 
             if solve_message == CHALLENGE_SOLVED_MESSAGE:
+                rechallenged = True
                 logging.debug("Challenge on a cleared session; reloading before capture")
                 phase_start = time.monotonic()
                 driver.get(req.url)
@@ -364,8 +368,9 @@ def _kani_capture_logic(req: V1RequestBase, driver: WebDriver,
             logging.debug("Reloading the cleared page with the capture script installed")
             phase_start = time.monotonic()
             driver.get(req.url)
-            _detect_and_solve_challenge(driver)
+            reload_message = _detect_and_solve_challenge(driver)
             timings['reloadMs'] = int((time.monotonic() - phase_start) * 1000)
+            rechallenged = reload_message == CHALLENGE_SOLVED_MESSAGE
 
         phase_start = time.monotonic()
         payload = _poll_for_payload(req, driver)
@@ -381,7 +386,7 @@ def _kani_capture_logic(req: V1RequestBase, driver: WebDriver,
         challenge_res.userAgent = utils.get_user_agent(driver)
         challenge_res.payload = payload
         challenge_res.timings = timings
-        challenge_res.reChallenged = solve_message == CHALLENGE_SOLVED_MESSAGE
+        challenge_res.reChallenged = rechallenged
         res.solution = challenge_res
         return res
     finally:
