@@ -266,3 +266,35 @@ class TestSessionCap(unittest.TestCase):
         self.assertEqual(2, len(capped), f'the cap must hold, got {capped}')
         self.assertIn('cap-c', capped, 'the newest session survives')
         self.assertNotIn('cap-a', capped, 'the least recently used is evicted first')
+
+
+class TestClearedSessionSkipsPreflight(TestKaniCapture):
+    """A session known to be cleared navigates once instead of twice."""
+
+    def test_the_second_capture_in_a_session_skips_the_preflight_load(self):
+        session = 'preflight'
+        try:
+            first = self.app.post_json('/v1', {
+                'cmd': 'kani.capture', 'url': self._url(), 'initScript': INIT_SCRIPT,
+                'session': session, 'maxTimeout': 60000,
+            })
+            second = self.app.post_json('/v1', {
+                'cmd': 'kani.capture', 'url': self._url(), 'initScript': INIT_SCRIPT,
+                'session': session, 'maxTimeout': 60000,
+            })
+
+            first_timings = V1ResponseBase(first.json).solution.timings
+            second_timings = V1ResponseBase(second.json).solution.timings
+
+            self.assertGreater(
+                first_timings['reloadMs'], 0,
+                'a fresh session must clear the page before installing scripts')
+            self.assertEqual(
+                second_timings['reloadMs'], 0,
+                'a cleared session must not pay a second page load')
+            payload = json.loads(V1ResponseBase(second.json).solution.payload)
+            self.assertIn('/api/data?token=tok-', payload['url'],
+                          'skipping the preflight must not change what is captured')
+        finally:
+            self.app.post_json('/v1', {'cmd': 'sessions.destroy', 'session': session},
+                               status='*')

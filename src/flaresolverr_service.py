@@ -279,7 +279,8 @@ def _cmd_kani_capture(req: V1RequestBase) -> V1ResponseBase:
                 else:
                     logging.debug(f"existing session is used to perform the capture (session_id={req.session})")
                 remaining = max(0.001, timeout - (time.monotonic() - started_at))
-                return func_timeout(remaining, _kani_capture_logic, (req, driver))
+                return func_timeout(remaining, _kani_capture_logic,
+                                    (req, driver, not fresh))
         driver = utils.get_webdriver(req.proxy)
         logging.debug('New instance of webdriver has been created to perform the capture')
         return func_timeout(timeout, _kani_capture_logic, (req, driver))
@@ -297,39 +298,74 @@ def _cmd_kani_capture(req: V1RequestBase) -> V1ResponseBase:
             logging.debug('A used instance of webdriver has been destroyed')
 
 
-def _kani_capture_logic(req: V1RequestBase, driver: WebDriver) -> V1ResponseBase:
+def _register_capture_scripts(driver: WebDriver, init_script: str) -> list:
+    driver.execute_cdp_cmd("Page.enable", {})
+    shim = driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument", {"source": KANI_CAPTURE_SHIM})
+    init = driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": _wrap_init_script(init_script)
+    })
+    return [shim.get('identifier'), init.get('identifier')]
+
+
+def _kani_capture_logic(req: V1RequestBase, driver: WebDriver,
+                        cleared: bool = False) -> V1ResponseBase:
+    """Captures a payload, optionally skipping the pre-flight navigation.
+
+    The default order navigates once to clear any challenge, then again with the
+    scripts installed, so the script never runs against a challenge document. A
+    session that has already captured is known to be cleared, so it installs
+    first and navigates once — and if a challenge appears anyway, it reloads,
+    which is the same guarantee by a different route: the polled document is
+    always one loaded after clearance.
+    """
     logging.debug(f"Navigating to... {req.url}")
     timings = {}
-    phase_start = time.monotonic()
-    driver.get(req.url)
-    timings['navigateMs'] = int((time.monotonic() - phase_start) * 1000)
-
-    phase_start = time.monotonic()
-    solve_message = _detect_and_solve_challenge(driver)
-    timings['solveMs'] = int((time.monotonic() - phase_start) * 1000)
-
-    # The solve may have left the driver pointed at a window that Cloudflare
-    # replaced. CDP init scripts bind to the attached target, so a stale handle
-    # would register the shim on a window that is never navigated again.
-    handles = driver.window_handles
-    if driver.current_window_handle not in handles:
-        driver.switch_to.window(handles[-1])
-
     script_ids = []
     try:
-        driver.execute_cdp_cmd("Page.enable", {})
-        shim = driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument", {"source": KANI_CAPTURE_SHIM})
-        init = driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": _wrap_init_script(req.initScript)
-        })
-        script_ids.extend([shim.get('identifier'), init.get('identifier')])
+        if cleared:
+            script_ids = _register_capture_scripts(driver, req.initScript)
 
-        logging.debug("Reloading the cleared page with the capture script installed")
-        phase_start = time.monotonic()
-        driver.get(req.url)
-        reload_message = _detect_and_solve_challenge(driver)
-        timings['reloadMs'] = int((time.monotonic() - phase_start) * 1000)
+            phase_start = time.monotonic()
+            driver.get(req.url)
+            timings['navigateMs'] = int((time.monotonic() - phase_start) * 1000)
+
+            phase_start = time.monotonic()
+            solve_message = _detect_and_solve_challenge(driver)
+            timings['solveMs'] = int((time.monotonic() - phase_start) * 1000)
+
+            if solve_message == CHALLENGE_SOLVED_MESSAGE:
+                logging.debug("Challenge on a cleared session; reloading before capture")
+                phase_start = time.monotonic()
+                driver.get(req.url)
+                _detect_and_solve_challenge(driver)
+                timings['reloadMs'] = int((time.monotonic() - phase_start) * 1000)
+            else:
+                timings['reloadMs'] = 0
+        else:
+            phase_start = time.monotonic()
+            driver.get(req.url)
+            timings['navigateMs'] = int((time.monotonic() - phase_start) * 1000)
+
+            phase_start = time.monotonic()
+            solve_message = _detect_and_solve_challenge(driver)
+            timings['solveMs'] = int((time.monotonic() - phase_start) * 1000)
+
+            # The solve may have left the driver pointed at a window that
+            # Cloudflare replaced. CDP init scripts bind to the attached target,
+            # so a stale handle would register the shim on a window that is
+            # never navigated again.
+            handles = driver.window_handles
+            if driver.current_window_handle not in handles:
+                driver.switch_to.window(handles[-1])
+
+            script_ids = _register_capture_scripts(driver, req.initScript)
+
+            logging.debug("Reloading the cleared page with the capture script installed")
+            phase_start = time.monotonic()
+            driver.get(req.url)
+            _detect_and_solve_challenge(driver)
+            timings['reloadMs'] = int((time.monotonic() - phase_start) * 1000)
 
         phase_start = time.monotonic()
         payload = _poll_for_payload(req, driver)
@@ -345,7 +381,7 @@ def _kani_capture_logic(req: V1RequestBase, driver: WebDriver) -> V1ResponseBase
         challenge_res.userAgent = utils.get_user_agent(driver)
         challenge_res.payload = payload
         challenge_res.timings = timings
-        challenge_res.reChallenged = reload_message == CHALLENGE_SOLVED_MESSAGE
+        challenge_res.reChallenged = solve_message == CHALLENGE_SOLVED_MESSAGE
         res.solution = challenge_res
         return res
     finally:
