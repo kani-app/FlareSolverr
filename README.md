@@ -335,6 +335,7 @@ serialised sessions, capture heartbeats, and per-capture script cleanup.
 
 | Name               | Default                | Notes                                                                                                                                    |
 | ------------------ | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| MAX_SESSIONS       | 4                      | Most sessions kept alive at once. Each holds a browser, so this bounds memory; the least recently used idle session is evicted when a new one is needed. |
 | API_KEY            | none                   | When set, `/v1` requires a matching `X-Api-Key` header and returns 401 otherwise. `/` and `/health` stay open. Unset means no auth, unchanged from stock. Compared in constant time. |
 | LOG_LEVEL          | info                   | Verbosity of the logging. Use `LOG_LEVEL=debug` for more information.                                                                    |
 | LOG_FILE           | none                   | Path to capture log to file. Example: `/config/flaresolverr.log`.                                                                         |

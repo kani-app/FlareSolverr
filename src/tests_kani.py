@@ -233,3 +233,36 @@ class TestKaniCaptureAuth(unittest.TestCase):
         app = self._app(self.KEY)
         self.assertIn('kani.capture/2', IndexResponse(app.get('/').json).capabilities)
         self.assertEqual(STATUS_OK, app.get('/health').json['status'])
+
+
+class TestSessionCap(unittest.TestCase):
+    """The cap bounds how many browsers can be alive at once."""
+
+    app = TestApp(flaresolverr.app)
+
+    def setUp(self):
+        import sessions
+        self._previous = sessions.MAX_SESSIONS
+        sessions.MAX_SESSIONS = 2
+
+    def tearDown(self):
+        import sessions
+        sessions.MAX_SESSIONS = self._previous
+        for name in ('cap-a', 'cap-b', 'cap-c'):
+            # An evicted session is already gone, which destroy reports as an error.
+            self.app.post_json(
+                '/v1', {'cmd': 'sessions.destroy', 'session': name}, status='*')
+
+    def test_a_third_session_evicts_the_least_recently_used(self):
+        for name in ('cap-a', 'cap-b'):
+            self.app.post_json('/v1', {'cmd': 'sessions.create', 'session': name})
+        live = set(self.app.post_json('/v1', {'cmd': 'sessions.list'}).json['sessions'])
+        self.assertEqual({'cap-a', 'cap-b'}, live & {'cap-a', 'cap-b', 'cap-c'})
+
+        self.app.post_json('/v1', {'cmd': 'sessions.create', 'session': 'cap-c'})
+        live = set(self.app.post_json('/v1', {'cmd': 'sessions.list'}).json['sessions'])
+        capped = live & {'cap-a', 'cap-b', 'cap-c'}
+
+        self.assertEqual(2, len(capped), f'the cap must hold, got {capped}')
+        self.assertIn('cap-c', capped, 'the newest session survives')
+        self.assertNotIn('cap-a', capped, 'the least recently used is evicted first')
