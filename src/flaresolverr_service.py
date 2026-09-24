@@ -56,7 +56,7 @@ TURNSTILE_SELECTORS = [
 SHORT_TIMEOUT = 1
 SESSIONS_STORAGE = SessionsStorage()
 
-CAPABILITIES = ['kani.capture/1', 'kani.capture/2']
+CAPABILITIES = ['kani.capture/1', 'kani.capture/2', 'kani.egress-guard/1']
 CHALLENGE_SOLVED_MESSAGE = "Challenge solved!"
 CHALLENGE_ABSENT_MESSAGE = "Challenge not detected!"
 KANI_CAPTURE_DEFAULT_TIMEOUT = 30000

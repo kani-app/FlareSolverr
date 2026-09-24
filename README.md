@@ -345,6 +345,9 @@ browser to reach your LAN, the solver's own host, or other containers.
 When a request supplies a `proxy`, that proxy is the network boundary and the
 guard is not used.
 
+`GET /` advertises `kani.egress-guard/1` so a caller can tell this solver apart
+from one without the guard.
+
 ## Environment variables
 
 | Name               | Default                | Notes                                                                                                                                    |

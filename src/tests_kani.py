@@ -83,6 +83,7 @@ class TestKaniCapture(unittest.TestCase):
         body = IndexResponse(self.app.get('/').json)
         self.assertIn('kani.capture/1', body.capabilities)
         self.assertIn('kani.capture/2', body.capabilities)
+        self.assertIn('kani.egress-guard/1', body.capabilities)
 
     def test_capture_returns_page_generated_token(self):
         res = self.app.post_json('/v1', {
