@@ -331,6 +331,20 @@ serialised sessions, capture heartbeats, and per-capture script cleanup.
 > stock image carries the URL-fetching half of this risk already; scripted
 > capture widens it.
 
+### Private-network egress guard
+
+Every browser this fork launches without an upstream `proxy` sends all of its
+traffic (pages, scripts, subresources, workers, tunnelled HTTPS) through a
+built-in forward proxy on `127.0.0.1`. It resolves each destination, refuses it
+if any address is private, loopback, link-local (including cloud metadata
+`169.254.169.254`), CGNAT, multicast or otherwise non-global, and then connects
+to the address it checked, so DNS rebinding cannot slip past the check. Refused
+requests fail in the page with `403`. A page therefore cannot use the solver's
+browser to reach your LAN, the solver's own host, or other containers.
+
+When a request supplies a `proxy`, that proxy is the network boundary and the
+guard is not used.
+
 ## Environment variables
 
 | Name               | Default                | Notes                                                                                                                                    |
