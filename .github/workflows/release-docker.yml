@@ -5,8 +5,6 @@ on:
   push:
     branches:
       - master
-    tags:
-      - "v*.*.*"
   pull_request:
     branches:
       - master
@@ -22,12 +20,29 @@ permissions:
 jobs:
   build-docker-images:
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Downcase repo
         run: echo REPOSITORY=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
+
+      # A version in package.json with no matching tag is a new release. Only a
+      # push to master publishes it; PRs and other refs never do.
+      - name: Read the version
+        id: version
+        run: |
+          version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$GITHUB_REF" = "refs/heads/master" ] \
+             && ! git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Docker meta
         id: docker_meta
@@ -36,11 +51,11 @@ jobs:
           images: |
             ghcr.io/${{ env.REPOSITORY }}
           tags: |
-            type=semver,pattern={{version}},prefix=v
             type=ref,event=pr
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=v${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.release == 'true' }}
           flavor: |
-            latest=auto
+            latest=false
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -65,3 +80,20 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.docker_meta.outputs.tags }}
           labels: ${{ steps.docker_meta.outputs.labels }}
+
+  # Tagged only after the versioned image is published, so a tag always has an
+  # image. The built-in token suffices: nothing is triggered by the tag.
+  tag-release:
+    needs: build-docker-images
+    if: needs.build-docker-images.outputs.release == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Tag the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.build-docker-images.outputs.version }}
+        run: |
+          gh api "repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA"
