@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased
+## v3.5.0-kani.1 (2026/09/25)
+First release of the Kani fork, based on upstream v3.5.0.
+* Add the `kani.capture` command: run a caller-supplied script in the browser that
+  cleared the challenge and return what it passes to `passPayload()`
+* Add persistent, serialised capture sessions with bounded queue waits, a cap on
+  live sessions, and optional named Chromium profiles
+* Report per-phase capture timings and whether a cleared session was re-challenged
+* Skip the pre-flight navigation on a session that is already cleared
+* Gate `/v1` behind an optional `API_KEY`
 * Route every browser without an upstream proxy through an egress guard that
   refuses private, loopback and metadata addresses for pages, scripts and
-  subresources alike
+  subresources alike; advertised as `kani.egress-guard/1`
+* Publish the image to `ghcr.io/kani-app/flaresolverr`, tagged `latest` from
+  `master` and `v<version>` for each release
+* Test the image on every PR: the Kani and egress-guard suites run inside it, and
+  an end-to-end check proves a private canary is unreachable from the browser
 
 ## v3.5.0 (2026/05/26)
 * Add formatting to log file

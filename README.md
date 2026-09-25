@@ -11,6 +11,15 @@
 
 FlareSolverr is a proxy server to bypass Cloudflare and DDoS-GUARD protection.
 
+> [!NOTE]
+> **This is the Kani fork.** It adds the `kani.capture` command and a
+> private-network egress guard used by [Kani](https://github.com/kani-app). Its
+> image is `ghcr.io/kani-app/flaresolverr`: `latest` follows `master`, and each
+> release is also published as `v<upstream version>-kani.<n>` (for example
+> `v3.5.0-kani.1`) so a deployment can pin a known-good solver. A release is cut
+> by raising `version` in `package.json` on `master`; the image is published and
+> then tagged automatically.
+
 ## How it works
 
 FlareSolverr starts a proxy server, and it waits for user requests in an idle state using few resources.
