@@ -13,6 +13,8 @@ class ChallengeResolutionResultT:
     screenshot: str | None = None
     turnstile_token: str = None
     payload: str = None
+    timings: dict = None
+    reChallenged: bool = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)

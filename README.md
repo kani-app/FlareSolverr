@@ -323,14 +323,37 @@ exceed `captureTimeout`.
 serialised sessions, capture heartbeats, and per-capture script cleanup.
 
 > [!WARNING]
-> This command executes JavaScript supplied by the caller. Do not expose a
-> FlareSolverr instance publicly — this applies to the stock image too, but the
-> consequences are broader here.
+> This command executes JavaScript supplied by the caller, in a browser inside
+> your network. With `session` and `profileKey`, that browser also holds a
+> persistent profile the caller names — so an unauthenticated caller can address
+> another caller's profile and read or poison its cookies. Bind the port to
+> localhost, and set `API_KEY` (below) if anything else can route to it. The
+> stock image carries the URL-fetching half of this risk already; scripted
+> capture widens it.
+
+### Private-network egress guard
+
+Every browser this fork launches without an upstream `proxy` sends all of its
+traffic (pages, scripts, subresources, workers, tunnelled HTTPS) through a
+built-in forward proxy on `127.0.0.1`. It resolves each destination, refuses it
+if any address is private, loopback, link-local (including cloud metadata
+`169.254.169.254`), CGNAT, multicast or otherwise non-global, and then connects
+to the address it checked, so DNS rebinding cannot slip past the check. Refused
+requests fail in the page with `403`. A page therefore cannot use the solver's
+browser to reach your LAN, the solver's own host, or other containers.
+
+When a request supplies a `proxy`, that proxy is the network boundary and the
+guard is not used.
+
+`GET /` advertises `kani.egress-guard/1` so a caller can tell this solver apart
+from one without the guard.
 
 ## Environment variables
 
 | Name               | Default                | Notes                                                                                                                                    |
 | ------------------ | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| MAX_SESSIONS       | 4                      | Most sessions kept alive at once. Each holds a browser, so this bounds memory; the least recently used idle session is evicted when a new one is needed. |
+| API_KEY            | none                   | When set, `/v1` requires a matching `X-Api-Key` header and returns 401 otherwise. `/` and `/health` stay open. Unset means no auth, unchanged from stock. Compared in constant time. |
 | LOG_LEVEL          | info                   | Verbosity of the logging. Use `LOG_LEVEL=debug` for more information.                                                                    |
 | LOG_FILE           | none                   | Path to capture log to file. Example: `/config/flaresolverr.log`.                                                                         |
 | LOG_HTML           | false                  | Only for debugging. If `true` all HTML that passes through the proxy will be logged to the console in `debug` level.                     |

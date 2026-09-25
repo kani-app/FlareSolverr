@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+* Route every browser without an upstream proxy through an egress guard that
+  refuses private, loopback and metadata addresses for pages, scripts and
+  subresources alike
+
 ## v3.5.0 (2026/05/26)
 * Add formatting to log file
 * Resolve turnstile captcha. Thanks @denis-svg

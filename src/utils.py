@@ -11,6 +11,8 @@ import urllib.parse
 from selenium.webdriver.chrome.webdriver import WebDriver
 import undetected_chromedriver as uc
 
+import egress_guard
+
 FLARESOLVERR_VERSION = None
 PLATFORM_VERSION = None
 CHROME_EXE_PATH = None
@@ -161,6 +163,11 @@ def get_webdriver(proxy: dict = None, user_data_dir: str = None) -> WebDriver:
         options.add_argument('--user-agent=%s' % USER_AGENT)
 
     proxy_extension_dir = None
+    if not proxy or 'url' not in proxy:
+        # With no upstream proxy configured, the egress guard is the browser's only
+        # route out; with one, that proxy is the network boundary instead.
+        for argument in egress_guard.chrome_arguments(egress_guard.ensure_started()):
+            options.add_argument(argument)
     if proxy and all(key in proxy for key in ['url', 'username', 'password']):
         proxy_extension_dir = create_proxy_extension(proxy)
         options.add_argument("--disable-features=DisableLoadExtensionCommandLineSwitch")

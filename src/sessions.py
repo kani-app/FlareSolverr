@@ -21,6 +21,7 @@ class Session:
     created_at: datetime
     last_used_at: datetime
     lock: threading.RLock = field(default_factory=threading.RLock)
+    in_use: bool = False
 
     def lifetime(self) -> timedelta:
         return datetime.now() - self.created_at
@@ -32,12 +33,32 @@ class Session:
         self.last_used_at = datetime.now()
 
 
+MAX_SESSIONS = max(1, int(os.environ.get('MAX_SESSIONS', '4')))
+
+
 class SessionsStorage:
     """SessionsStorage creates, stores and process all the sessions"""
 
     def __init__(self):
         self.sessions = {}
         self.lock = threading.RLock()
+
+    def _evict_until_under_cap(self):
+        """Each live session holds a browser, so an uncapped store grows with the
+        number of callers. Evicts least-recently-used sessions that are not
+        mid-capture; a busy store may briefly exceed the cap rather than block."""
+        while len(self.sessions) >= MAX_SESSIONS:
+            idle = [s for s in self.sessions.values() if not s.in_use]
+            if not idle:
+                logging.warning(
+                    'session cap %d reached with every session busy; '
+                    'allowing an extra session', MAX_SESSIONS)
+                return
+            victim = min(idle, key=lambda s: s.last_used_at)
+            logging.info('evicting least-recently-used session %s to stay under '
+                         'the cap of %d', victim.session_id, MAX_SESSIONS)
+            self.sessions.pop(victim.session_id, None)
+            threading.Thread(target=self._close, args=(victim,), daemon=True).start()
 
     def create(self, session_id: Optional[str] = None, proxy: Optional[dict] = None,
                force_new: Optional[bool] = False,
@@ -60,6 +81,8 @@ class SessionsStorage:
 
             if self.exists(session_id):
                 return self.sessions[session_id], False
+
+            self._evict_until_under_cap()
 
             profile_dir = None
             if profile_key:
@@ -130,9 +153,11 @@ class SessionsStorage:
                 else session.lock.acquire()
         if not acquired:
             raise TimeoutError(f'Timeout waiting for session {session_id}.')
+        session.in_use = True
         try:
             yield session, fresh
         finally:
+            session.in_use = False
             session.touch()
             session.lock.release()
 
