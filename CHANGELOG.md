@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.5.2-kani.1 (2026/09/25)
+* Rebase the Kani fork on upstream v3.5.2 (below). Upstream's cookie-timing fix
+  is ported to the fork's restructured request handler.
+* Bump GitHub Actions in the release and test workflows
+
 ## v3.5.0-kani.1 (2026/09/25)
 First release of the Kani fork, based on upstream v3.5.0.
 * Add the `kani.capture` command: run a caller-supplied script in the browser that
@@ -16,6 +21,14 @@ First release of the Kani fork, based on upstream v3.5.0.
   `master` and `v<version>` for each release
 * Test the image on every PR: the Kani and egress-guard suites run inside it, and
   an end-to-end check proves a private canary is unreachable from the browser
+
+## v3.5.2 (2026/09/12)
+* Update build_package.py
+* Disable breaking Local Network Access Checks popup
+* Make the challenge wait timeout configurable. Thanks @aki-ks
+* Fixed multiple buttons bug for tabs_till_verify. Thanks @denis-svg
+* Fix cookies being retrieved before waitInSeconds delay. Thanks @Br1an67
+* Bump dependencies & Chromium
 
 ## v3.5.0 (2026/05/26)
 * Add formatting to log file
