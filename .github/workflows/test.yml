@@ -1,0 +1,40 @@
+name: Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build the solver image
+        run: docker build -t flaresolverr-kani:ci .
+
+      # Chromium only exists inside the image, so the browser tests run there.
+      # tests.py is left out: it depends on third-party sites staying unchanged.
+      - name: Run the Kani and egress-guard tests in the image
+        run: |
+          docker run --rm --entrypoint sh \
+            -v "$PWD/test-requirements.txt:/tmp/test-requirements.txt:ro" \
+            flaresolverr-kani:ci -c \
+            'pip install --user -q -r /tmp/test-requirements.txt && cd /app && python -m unittest -v tests_egress_guard tests_kani'
+
+      - name: Check the egress guard end to end
+        run: bash .github/scripts/egress-e2e.sh flaresolverr-kani:ci
