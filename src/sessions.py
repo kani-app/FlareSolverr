@@ -22,6 +22,7 @@ class Session:
     last_used_at: datetime
     lock: threading.RLock = field(default_factory=threading.RLock)
     in_use: bool = False
+    profile_dir: Optional[str] = None
 
     def lifetime(self) -> timedelta:
         return datetime.now() - self.created_at
@@ -35,6 +36,15 @@ class Session:
 
 MAX_SESSIONS = max(1, int(os.environ.get('MAX_SESSIONS', '4')))
 
+PROFILES_ROOT = '/config/kani-profiles'
+
+# Chrome's profile lock. The lock names the host and pid that took it, and a
+# host that differs from ours reads as the profile being open on another
+# computer: Chrome refuses to start and chromedriver times out. /config outlives
+# the container while the hostname (the container id) does not, so every
+# recreate strands the lock of any browser that was not shut down cleanly.
+PROFILE_LOCK_FILES = ('SingletonLock', 'SingletonSocket', 'SingletonCookie')
+
 
 class SessionsStorage:
     """SessionsStorage creates, stores and process all the sessions"""
@@ -42,6 +52,9 @@ class SessionsStorage:
     def __init__(self):
         self.sessions = {}
         self.lock = threading.RLock()
+        # Profile directories a browser launched by this process may still hold,
+        # including one whose session is gone but whose close has not finished.
+        self._held_profiles = set()
 
     def _evict_until_under_cap(self):
         """Each live session holds a browser, so an uncapped store grows with the
@@ -59,6 +72,18 @@ class SessionsStorage:
                          'the cap of %d', victim.session_id, MAX_SESSIONS)
             self.sessions.pop(victim.session_id, None)
             threading.Thread(target=self._close, args=(victim,), daemon=True).start()
+
+    def _release_stale_profile_lock(self, profile_dir: str):
+        """Only this process launches browsers on these profiles, so a lock on a
+        directory none of its browsers holds is stale whatever host it names."""
+        if profile_dir in self._held_profiles:
+            return
+        for name in PROFILE_LOCK_FILES:
+            path = os.path.join(profile_dir, name)
+            if os.path.lexists(path):
+                logging.info('removing stale Chrome profile lock %s -> %s',
+                             path, os.readlink(path) if os.path.islink(path) else '')
+                os.remove(path)
 
     def create(self, session_id: Optional[str] = None, proxy: Optional[dict] = None,
                force_new: Optional[bool] = False,
@@ -87,12 +112,16 @@ class SessionsStorage:
             profile_dir = None
             if profile_key:
                 digest = hashlib.sha256(profile_key.encode()).hexdigest()
-                profile_dir = os.path.join('/config/kani-profiles', digest)
+                profile_dir = os.path.join(PROFILES_ROOT, digest)
                 os.makedirs(profile_dir, exist_ok=True)
+                self._release_stale_profile_lock(profile_dir)
             driver = utils.get_webdriver(proxy, profile_dir) if profile_dir \
                 else utils.get_webdriver(proxy)
+            if profile_dir:
+                self._held_profiles.add(profile_dir)
             created_at = datetime.now()
-            session = Session(session_id, driver, created_at, created_at)
+            session = Session(session_id, driver, created_at, created_at,
+                              profile_dir=profile_dir)
 
             self.sessions[session_id] = session
 
@@ -124,12 +153,16 @@ class SessionsStorage:
         threading.Thread(target=self._close, args=(session,), daemon=True).start()
         return True
 
-    @staticmethod
-    def _close(session: Session):
-        with session.lock:
-            if utils.PLATFORM_VERSION == "nt":
-                session.driver.close()
-            session.driver.quit()
+    def _close(self, session: Session):
+        try:
+            with session.lock:
+                if utils.PLATFORM_VERSION == "nt":
+                    session.driver.close()
+                session.driver.quit()
+        finally:
+            if session.profile_dir:
+                with self.lock:
+                    self._held_profiles.discard(session.profile_dir)
 
     def get(self, session_id: str, ttl: Optional[timedelta] = None,
             profile_key: Optional[str] = None) -> Tuple[Session, bool]:

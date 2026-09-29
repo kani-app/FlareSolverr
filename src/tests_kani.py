@@ -302,3 +302,34 @@ class TestClearedSessionSkipsPreflight(TestKaniCapture):
         finally:
             self.app.post_json('/v1', {'cmd': 'sessions.destroy', 'session': session},
                                status='*')
+
+
+class TestStrandedProfileLock(TestKaniCapture):
+    """A recreated container inherits the profile lock of the one before it."""
+
+    def test_a_lock_left_by_another_host_does_not_block_the_session(self):
+        import hashlib
+        import os
+        session = profile_key = 'kani-test-stranded-lock'
+        profile_dir = os.path.join(
+            '/config/kani-profiles', hashlib.sha256(profile_key.encode()).hexdigest())
+        os.makedirs(profile_dir, exist_ok=True)
+        # The shape Chrome writes, naming a container that no longer exists.
+        for name, target in (('SingletonLock', 'deadcontainer-20823'),
+                             ('SingletonCookie', '14351475019925813032'),
+                             ('SingletonSocket', '/tmp/org.chromium.Chromium.gone/SingletonSocket')):
+            path = os.path.join(profile_dir, name)
+            if os.path.lexists(path):
+                os.remove(path)
+            os.symlink(target, path)
+        try:
+            res = self.app.post_json('/v1', {
+                'cmd': 'kani.capture', 'url': self._url(), 'initScript': INIT_SCRIPT,
+                'session': session, 'profileKey': profile_key, 'maxTimeout': 90000,
+            }, status='*')
+            body = V1ResponseBase(res.json)
+            self.assertEqual(STATUS_OK, body.status, body.message)
+            self.assertIn('/api/data?token=tok-', json.loads(body.solution.payload)['url'])
+        finally:
+            self.app.post_json('/v1', {'cmd': 'sessions.destroy', 'session': session},
+                               status='*')
